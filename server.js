@@ -3,9 +3,54 @@ const puppeteer = require('puppeteer');
 const cors = require('cors');
 const helmet = require('helmet');
 const compression = require('compression');
+const { URL } = require('url');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Security configuration
+const ALLOWED_PROTOCOLS = ['http:', 'https:'];
+const BLOCKED_HOSTS = [
+  'localhost',
+  '127.0.0.1',
+  '0.0.0.0',
+  '::1',
+  'metadata.google.internal',
+  '169.254.169.254', // AWS metadata service
+  '172.16.0.0/12',   // Docker internal networks
+  '10.0.0.0/8',      // Private networks
+  '192.168.0.0/16'   // Private networks
+];
+
+// URL validation function to prevent SSRF attacks
+// This validates URLs before they are used in Puppeteer page.goto() calls
+function validateURL(urlString) {
+  try {
+    const url = new URL(urlString);
+    
+    // Check protocol
+    if (!ALLOWED_PROTOCOLS.includes(url.protocol)) {
+      throw new Error(`Protocol ${url.protocol} is not allowed`);
+    }
+    
+    // Check for blocked hosts
+    const hostname = url.hostname.toLowerCase();
+    for (const blockedHost of BLOCKED_HOSTS) {
+      if (hostname === blockedHost || hostname.includes(blockedHost)) {
+        throw new Error(`Access to ${hostname} is not allowed`);
+      }
+    }
+    
+    // Block private IP ranges
+    if (hostname.match(/^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.)/)) {
+      throw new Error('Access to private IP ranges is not allowed');
+    }
+    
+    return url;
+  } catch (error) {
+    throw new Error(`Invalid URL: ${error.message}`);
+  }
+}
 
 // Middleware
 app.use(helmet());
@@ -46,6 +91,9 @@ app.post('/screenshot', async (req, res) => {
       return res.status(400).json({ error: 'URL is required' });
     }
 
+    // Validate URL for security
+    const validatedURL = validateURL(url);
+
     const browser = await puppeteer.launch({
       headless: 'new',
       args: [
@@ -66,7 +114,7 @@ app.post('/screenshot', async (req, res) => {
       await page.setViewport(options.viewport);
     }
     
-    await page.goto(url, { waitUntil: 'networkidle0' });
+    await page.goto(validatedURL.href, { waitUntil: 'networkidle0' });
     
     const screenshot = await page.screenshot({
       type: 'png',
@@ -93,6 +141,11 @@ app.post('/pdf', async (req, res) => {
       return res.status(400).json({ error: 'URL or HTML content is required' });
     }
 
+    let validatedURL;
+    if (url) {
+      validatedURL = validateURL(url);
+    }
+
     const browser = await puppeteer.launch({
       headless: 'new',
       args: [
@@ -109,7 +162,7 @@ app.post('/pdf', async (req, res) => {
     const page = await browser.newPage();
     
     if (url) {
-      await page.goto(url, { waitUntil: 'networkidle0' });
+      await page.goto(validatedURL.href, { waitUntil: 'networkidle0' });
     } else {
       await page.setContent(html, { waitUntil: 'networkidle0' });
     }
@@ -139,6 +192,9 @@ app.post('/scrape', async (req, res) => {
       return res.status(400).json({ error: 'URL is required' });
     }
 
+    // Validate URL for security
+    const validatedURL = validateURL(url);
+
     const browser = await puppeteer.launch({
       headless: 'new',
       args: [
@@ -153,7 +209,7 @@ app.post('/scrape', async (req, res) => {
     });
 
     const page = await browser.newPage();
-    await page.goto(url, { waitUntil: 'networkidle0' });
+    await page.goto(validatedURL.href, { waitUntil: 'networkidle0' });
     
     let result;
     if (selector) {
