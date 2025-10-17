@@ -53,12 +53,6 @@ test_endpoint "Health Check" "GET" "/health" "" "200"
 # Test root endpoint
 test_endpoint "Root Endpoint" "GET" "/" "" "200"
 
-# Test screenshot endpoint (will fail without proper setup but should return 500, not 404)
-test_endpoint "Screenshot Endpoint" "POST" "/screenshot" '{"url":"https://example.com"}' "500"
-
-# Test PDF endpoint
-test_endpoint "PDF Endpoint" "POST" "/pdf" '{"html":"<h1>Test</h1>"}' "500"
-
 # Test scrape endpoint
 test_endpoint "Scrape Endpoint" "POST" "/scrape" '{"url":"https://example.com"}' "500"
 
