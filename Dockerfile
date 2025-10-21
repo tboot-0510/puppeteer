@@ -1,5 +1,5 @@
 # Base: lightweight Node + Chromium runtime (no need to install Chrome manually)
-FROM ghcr.io/puppeteer/puppeteer:22-slim
+FROM ghcr.io/puppeteer/puppeteer:latest
 
 # Create app directory
 WORKDIR /usr/src/app
