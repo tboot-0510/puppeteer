@@ -1,15 +1,14 @@
 services:
   puppeteer-service:
-    build: 
+    build:
       context: .
       dockerfile: Dockerfile
     container_name: puppeteer-microservice
     restart: unless-stopped
-    ports:
-      - "3000:3000"
+    expose:
+      - "3000"
     environment:
       - NODE_ENV=production
-      - PORT=3000
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
       interval: 30s
