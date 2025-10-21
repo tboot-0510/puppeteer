@@ -1,46 +1,32 @@
-# Use official Node.js runtime as base image
-FROM node:18-slim
-
-# Install dependencies for Puppeteer
-RUN apt-get update \
-    && apt-get install -y wget gnupg \
-    && wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add - \
-    && sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list' \
-    && apt-get update \
-    && apt-get install -y google-chrome-stable fonts-ipafont-gothic fonts-wqy-zenhei fonts-thai-tlwg fonts-kacst fonts-freefont-ttf libxss1 \
-      --no-install-recommends \
-    && rm -rf /var/lib/apt/lists/*
+# Base: lightweight Node + Chromium runtime (no need to install Chrome manually)
+FROM ghcr.io/puppeteer/puppeteer:22-slim
 
 # Create app directory
 WORKDIR /usr/src/app
 
-# Copy package files
+# Copy package files first (better Docker caching)
 COPY package*.json ./
 
-# Install app dependencies
-RUN npm ci --only=production && npm cache clean --force
-
-# Create non-root user for security
-RUN groupadd -r pptruser && useradd -r -g pptruser -G audio,video pptruser \
-    && mkdir -p /home/pptruser/Downloads \
-    && chown -R pptruser:pptruser /home/pptruser \
-    && chown -R pptruser:pptruser /usr/src/app
+# Install dependencies (omit devDeps, skip audit, progress off for speed)
+RUN npm install --omit=dev --no-audit --progress=false && npm cache clean --force
 
 # Copy app source
-COPY --chown=pptruser:pptruser . .
+COPY . .
 
-# Switch to non-root user
-USER pptruser
-
-# Expose port
+# Expose the app port
 EXPOSE 3000
 
-# Define environment variable
-ENV NODE_ENV=production
+# Environment vars for Puppeteer
+ENV NODE_ENV=production \
+    PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome-stable \
+    PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 
-# Add health check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD curl -f http://localhost:3000/health || exit 1
+# Healthcheck to ensure Puppeteer service is up
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD node -e "fetch('http://localhost:3000/health').then(r => {if(!r.ok) process.exit(1)})"
 
-# Start the application
+# Run as non-root (user created in base image)
+USER pptruser
+
+# Start the app
 CMD ["node", "server.js"]
