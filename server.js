@@ -8,6 +8,38 @@ const { URL } = require("url");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Browser instance for reuse
+let browserInstance = null;
+
+// Get or create browser instance (reuse for better performance)
+async function getBrowser() {
+  if (!browserInstance || !browserInstance.isConnected()) {
+    browserInstance = await puppeteer.launch({
+      headless: "new",
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-accelerated-2d-canvas",
+        "--no-first-run",
+        "--no-zygote",
+        "--disable-gpu",
+        "--disable-extensions",
+        "--disable-plugins",
+        "--disable-background-timer-throttling",
+        "--disable-renderer-backgrounding",
+        "--disable-features=TranslateUI",
+        "--disable-ipc-flooding-protection",
+        "--disable-backgrounding-occluded-windows",
+        "--disable-web-security",
+        "--memory-pressure-off",
+        "--max_old_space_size=4096",
+      ],
+    });
+  }
+  return browserInstance;
+}
+
 // Security configuration
 const ALLOWED_PROTOCOLS = ["http:", "https:"];
 const BLOCKED_HOSTS = [
@@ -82,6 +114,8 @@ app.get("/", (req, res) => {
 
 // Web scraping endpoint
 app.post("/scrape", async (req, res) => {
+  let page; // Declare page variable for proper cleanup
+
   try {
     const { url, selector, options = {} } = req.body;
 
@@ -92,36 +126,51 @@ app.post("/scrape", async (req, res) => {
     // Validate URL for security
     const validatedURL = validateURL(url);
 
-    console.time("launchBrowser");
+    console.time("getBrowser");
     const launchStart = Date.now();
-    const browser = await puppeteer.launch({
-      headless: "new",
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-accelerated-2d-canvas",
-        "--no-first-run",
-        "--no-zygote",
-        "--disable-gpu",
-      ],
-    });
+    const browser = await getBrowser();
     const launchStop = Date.now() - launchStart;
-    console.timeEnd("launchBrowser");
+    console.timeEnd("getBrowser");
 
     const openPageStart = Date.now();
     console.time("openPageStart");
-    const page = await browser.newPage();
-    await page.goto(validatedURL.href, { waitUntil: "networkidle0" });
+    page = await browser.newPage();
+
+    // Set smaller viewport for faster rendering
+    await page.setViewport({ width: 1024, height: 768 });
+
+    // Set a faster user agent
+    await page.setUserAgent(
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    );
+
+    // Disable images and CSS for faster loading (optional - can be configured)
+    await page.setRequestInterception(true);
+    page.on("request", (request) => {
+      if (["image", "stylesheet", "font"].includes(request.resourceType())) {
+        request.abort();
+      } else {
+        request.continue();
+      }
+    });
+
+    // Use faster wait strategy with timeout
+    await page.goto(validatedURL.href, {
+      waitUntil: "domcontentloaded",
+      timeout: 10000, // 10 second timeout
+    });
+
     const openPageStop = Date.now() - openPageStart;
 
     console.timeEnd("openPageStart");
 
     console.time("scrapPage");
+    const scapePageStart = Date.now();
     const textContent = await page.evaluate(() => {
       return document.querySelector("body")?.innerText;
     });
     console.timeEnd("scrapPage");
+    const scapePageStop = Date.now() - scapePageStart;
 
     if (!textContent) {
       res.status(500).json({ error: "An error occurred during scraping." });
@@ -148,16 +197,24 @@ app.post("/scrape", async (req, res) => {
       return;
     }
 
-    await browser.close();
-
     res.json({
       data: textContent,
-      launchTime: launchStop,
-      openPageTime: openPageStop,
-      scrapPageTime: Date.now() - openPageStop,
+      launchTime: launchStop / 1000,
+      openPageTime: openPageStop / 1000,
+      scrapPageTime: scapePageStop / 1000,
     });
   } catch (error) {
     console.error("Scraping error:", error);
+
+    // Ensure page is closed even on error
+    try {
+      if (page && !page.isClosed()) {
+        await page.close();
+      }
+    } catch (closeError) {
+      console.error("Error closing page:", closeError);
+    }
+
     res
       .status(500)
       .json({ error: "Failed to scrape content", details: error.message });
@@ -177,12 +234,20 @@ app.listen(PORT, "0.0.0.0", () => {
 });
 
 // Graceful shutdown
-process.on("SIGTERM", () => {
-  console.log("SIGTERM received, shutting down gracefully");
-  process.exit(0);
-});
+async function gracefulShutdown(signal) {
+  console.log(`${signal} received, shutting down gracefully`);
 
-process.on("SIGINT", () => {
-  console.log("SIGINT received, shutting down gracefully");
+  try {
+    if (browserInstance && browserInstance.isConnected()) {
+      await browserInstance.close();
+      console.log("Browser instance closed successfully");
+    }
+  } catch (error) {
+    console.error("Error closing browser:", error);
+  }
+
   process.exit(0);
-});
+}
+
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));
