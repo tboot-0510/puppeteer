@@ -17,9 +17,7 @@ COPY . .
 EXPOSE 3000
 
 # Environment vars for Puppeteer
-ENV NODE_ENV=production \
-    PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome-stable \
-    PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+ENV NODE_ENV=production
 
 # Healthcheck to ensure Puppeteer service is up
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
