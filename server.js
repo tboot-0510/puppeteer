@@ -92,6 +92,8 @@ app.post("/scrape", async (req, res) => {
     // Validate URL for security
     const validatedURL = validateURL(url);
 
+    console.time("launchBrowser");
+    const launchStart = Date.now();
     const browser = await puppeteer.launch({
       headless: "new",
       args: [
@@ -104,13 +106,22 @@ app.post("/scrape", async (req, res) => {
         "--disable-gpu",
       ],
     });
+    const launchStop = Date.now() - launchStart;
+    console.timeEnd("launchBrowser");
 
+    const openPageStart = Date.now();
+    console.time("openPageStart");
     const page = await browser.newPage();
     await page.goto(validatedURL.href, { waitUntil: "networkidle0" });
+    const openPageStop = Date.now() - openPageStart;
 
+    console.timeEnd("openPageStart");
+
+    console.time("scrapPage");
     const textContent = await page.evaluate(() => {
       return document.querySelector("body")?.innerText;
     });
+    console.timeEnd("scrapPage");
 
     if (!textContent) {
       res.status(500).json({ error: "An error occurred during scraping." });
@@ -139,7 +150,12 @@ app.post("/scrape", async (req, res) => {
 
     await browser.close();
 
-    res.json({ data: textContent });
+    res.json({
+      data: textContent,
+      launchTime: launchStop,
+      openPageTime: openPageStop,
+      scrapPageTime: Date.now() - openPageStop,
+    });
   } catch (error) {
     console.error("Scraping error:", error);
     res
