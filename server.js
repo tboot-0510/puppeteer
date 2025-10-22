@@ -84,12 +84,138 @@ function validateURL(urlString) {
   }
 }
 
+// Authentication middleware to restrict access
+const ALLOWED_ORIGINS = [
+  "https://us-central1-clicksafe-374816.cloudfunctions.net",
+];
+
+const ALLOWED_IPS = [
+  "176.136.146.11", // Your laptop IP
+];
+
+function authenticateRequest(req, res, next) {
+  // Skip authentication for health check and root endpoints
+  if (req.path === "/health" || req.path === "/") {
+    return next();
+  }
+
+  const origin = req.get("Origin");
+  const referer = req.get("Referer");
+  const userAgent = req.get("User-Agent");
+  const forwardedFor = req.get("X-Forwarded-For");
+  const realIP = req.get("X-Real-IP");
+  const clientIP =
+    req.ip || req.connection.remoteAddress || req.socket.remoteAddress;
+
+  // Log all incoming requests for monitoring
+  console.log(`Incoming request: ${req.method} ${req.path}`, {
+    origin,
+    referer,
+    userAgent,
+    forwardedFor,
+    realIP,
+    clientIP,
+    timestamp: new Date().toISOString(),
+  });
+
+  // Check if request comes from allowed origins
+  const isValidOrigin =
+    origin &&
+    ALLOWED_ORIGINS.some((allowedOrigin) => origin.startsWith(allowedOrigin));
+  const isValidReferer =
+    referer &&
+    ALLOWED_ORIGINS.some((allowedOrigin) => referer.startsWith(allowedOrigin));
+
+  // Check if request comes from allowed IP addresses
+  const isFromAllowedIP =
+    ALLOWED_IPS.includes(clientIP) ||
+    ALLOWED_IPS.includes(realIP) ||
+    (forwardedFor && ALLOWED_IPS.some((ip) => forwardedFor.includes(ip)));
+
+  // Also check for Google Cloud Function user agent pattern
+  const isGoogleCloudFunction =
+    userAgent && userAgent.includes("Google-Cloud-Functions");
+
+  // Additional check for Google Cloud internal IP ranges
+  const isFromGoogleCloud =
+    forwardedFor &&
+    (forwardedFor.includes("169.254.") || // Google Cloud metadata IP range
+      forwardedFor.includes("10.")); // Internal Google Cloud IP range
+
+  if (
+    !isValidOrigin &&
+    !isValidReferer &&
+    !isFromAllowedIP &&
+    !isGoogleCloudFunction &&
+    !isFromGoogleCloud
+  ) {
+    console.warn(`🚫 Unauthorized request blocked`, {
+      path: req.path,
+      origin,
+      referer,
+      userAgent,
+      forwardedFor,
+      realIP,
+      clientIP,
+      timestamp: new Date().toISOString(),
+    });
+
+    return res.status(403).json({
+      error: "Forbidden: Unauthorized access",
+      message: "This service only accepts requests from authorized sources",
+    });
+  }
+
+  console.log(
+    `✅ Authorized request allowed from: ${
+      origin || referer || clientIP || realIP || "Google Cloud Function"
+    }`
+  );
+  next();
+}
+
 // Middleware
-app.use(helmet());
-app.use(cors());
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        connectSrc: ["'self'", ...ALLOWED_ORIGINS],
+      },
+    },
+    hsts: {
+      maxAge: 31536000,
+      includeSubDomains: true,
+      preload: true,
+    },
+  })
+);
+app.use(
+  cors({
+    origin: function (origin, callback) {
+      // Allow requests with no origin (like mobile apps or Postman)
+      if (!origin) return callback(null, true);
+
+      // Allow requests from whitelisted origins
+      const isAllowedOrigin = ALLOWED_ORIGINS.some((allowedOrigin) =>
+        origin.startsWith(allowedOrigin)
+      );
+
+      if (isAllowedOrigin) {
+        return callback(null, true);
+      }
+
+      return callback(new Error("Not allowed by CORS"));
+    },
+    credentials: true,
+  })
+);
 app.use(compression());
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
+
+// Apply authentication middleware
+app.use(authenticateRequest);
 
 // Health check endpoint
 app.get("/health", (req, res) => {
