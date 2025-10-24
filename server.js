@@ -93,6 +93,38 @@ const ALLOWED_IPS = [
   "176.136.146.11", // Your laptop IP
 ];
 
+// Allowed Chrome extension IDs (replace with your actual extension ID)
+const ALLOWED_EXTENSION_IDS = [
+  process.env.CHROME_EXTENSION_ID || "ojgppiocgnfkdafnikkiliekbmmagome",
+];
+
+// Secret for request signing (keep this secret on server only)
+const SERVER_SECRET =
+  process.env.SERVER_SECRET || "your-server-secret-key-2024";
+
+// Simple request signature verification
+function verifyRequestSignature(timestamp, nonce, signature, extensionId) {
+  const crypto = require("crypto");
+
+  // Check if timestamp is within 5 minutes (prevent replay attacks)
+  const currentTime = Date.now();
+  const requestTime = parseInt(timestamp);
+  const fiveMinutes = 5 * 60 * 1000;
+
+  if (Math.abs(currentTime - requestTime) > fiveMinutes) {
+    return false;
+  }
+
+  // Create expected signature
+  const message = `${timestamp}:${nonce}:${extensionId}`;
+  const expectedSignature = crypto
+    .createHmac("sha256", SERVER_SECRET)
+    .update(message)
+    .digest("hex");
+
+  return signature === expectedSignature;
+}
+
 function authenticateRequest(req, res, next) {
   // Skip authentication for health check and root endpoints
   if (req.path === "/health" || req.path === "/") {
@@ -107,6 +139,11 @@ function authenticateRequest(req, res, next) {
   const clientIP =
     req.ip || req.connection.remoteAddress || req.socket.remoteAddress;
 
+  // Chrome extension authentication headers
+  const timestamp = req.get("X-Timestamp");
+  const nonce = req.get("X-Nonce");
+  const signature = req.get("X-Signature");
+
   // Log all incoming requests for monitoring
   console.log(`Incoming request: ${req.method} ${req.path}`, {
     origin,
@@ -115,8 +152,48 @@ function authenticateRequest(req, res, next) {
     forwardedFor,
     realIP,
     clientIP,
+    hasSignature: !!signature,
     timestamp: new Date().toISOString(),
   });
+
+  // Check if request comes from Chrome extension
+  const isChromeExtension = origin && origin.startsWith("chrome-extension://");
+  let isValidChromeExtension = false;
+
+  if (isChromeExtension) {
+    // Extract extension ID from origin
+    const extensionId = origin.replace("chrome-extension://", "").split("/")[0];
+
+    // Check if extension ID is in allowed list
+    const isAllowedExtension = ALLOWED_EXTENSION_IDS.includes(extensionId);
+
+    // For development/testing, allow any extension from your IP
+    const isFromAllowedDevIP =
+      ALLOWED_IPS.includes(clientIP) ||
+      ALLOWED_IPS.includes(realIP) ||
+      (forwardedFor && ALLOWED_IPS.some((ip) => forwardedFor.includes(ip)));
+
+    if (isAllowedExtension || isFromAllowedDevIP) {
+      // Verify signature if provided (optional for enhanced security)
+      if (timestamp && nonce && signature) {
+        isValidChromeExtension = verifyRequestSignature(
+          timestamp,
+          nonce,
+          signature,
+          extensionId
+        );
+        if (!isValidChromeExtension) {
+          console.warn(`❌ Invalid signature for extension ${extensionId}`);
+        }
+      } else {
+        // Allow without signature for basic extension validation
+        isValidChromeExtension = true;
+        console.log(
+          `✅ Chrome extension allowed: ${extensionId} (no signature required)`
+        );
+      }
+    }
+  }
 
   // Check if request comes from allowed origins
   const isValidOrigin =
@@ -142,7 +219,9 @@ function authenticateRequest(req, res, next) {
     (forwardedFor.includes("169.254.") || // Google Cloud metadata IP range
       forwardedFor.includes("10.")); // Internal Google Cloud IP range
 
+  // Allow if any of the authentication methods pass
   if (
+    !isValidChromeExtension &&
     !isValidOrigin &&
     !isValidReferer &&
     !isFromAllowedIP &&
@@ -157,20 +236,27 @@ function authenticateRequest(req, res, next) {
       forwardedFor,
       realIP,
       clientIP,
+      isChromeExtension,
+      extensionId: isChromeExtension
+        ? origin.replace("chrome-extension://", "").split("/")[0]
+        : null,
       timestamp: new Date().toISOString(),
     });
 
     return res.status(403).json({
       error: "Forbidden: Unauthorized access",
-      message: "This service only accepts requests from authorized sources",
+      message: "This service only accepts requests from authorized sources.",
+      hint: isChromeExtension
+        ? "Chrome extension ID not recognized or request not properly signed."
+        : "Invalid origin or IP address.",
     });
   }
 
-  console.log(
-    `✅ Authorized request allowed from: ${
-      origin || referer || clientIP || realIP || "Google Cloud Function"
-    }`
-  );
+  const authSource = isValidChromeExtension
+    ? "Chrome Extension"
+    : origin || referer || clientIP || realIP || "Google Cloud Function";
+
+  console.log(`✅ Authorized request allowed from: ${authSource}`);
   next();
 }
 
@@ -196,6 +282,11 @@ app.use(
       // Allow requests with no origin (like mobile apps or Postman)
       if (!origin) return callback(null, true);
 
+      // Allow Chrome extension origins
+      if (origin.startsWith("chrome-extension://")) {
+        return callback(null, true);
+      }
+
       // Allow requests from whitelisted origins
       const isAllowedOrigin = ALLOWED_ORIGINS.some((allowedOrigin) =>
         origin.startsWith(allowedOrigin)
@@ -205,9 +296,20 @@ app.use(
         return callback(null, true);
       }
 
+      // Log CORS rejections for debugging
+      console.warn(`CORS blocked origin: ${origin}`);
       return callback(new Error("Not allowed by CORS"));
     },
     credentials: true,
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+      "X-API-Key",
+      "X-Timestamp",
+      "X-Nonce",
+      "X-Signature",
+    ],
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
   })
 );
 app.use(compression());
@@ -234,7 +336,40 @@ app.get("/", (req, res) => {
     endpoints: {
       "/health": "Health check",
       "/scrape": "POST - Scrape webpage content",
+      "/extension-info": "GET - Chrome extension authentication info",
     },
+    authentication: {
+      "chrome-extensions":
+        "Extension ID must be whitelisted. Optional signature headers for enhanced security.",
+      "cloud-functions":
+        "Requests from allowed origins are automatically authenticated",
+      "allowed-ips": "Requests from whitelisted IPs are allowed",
+    },
+  });
+});
+
+// Chrome extension info endpoint
+app.get("/extension-info", (req, res) => {
+  const origin = req.get("Origin");
+  const isChromeExtension = origin && origin.startsWith("chrome-extension://");
+
+  if (!isChromeExtension) {
+    return res.status(400).json({
+      error: "This endpoint is only for Chrome extensions",
+    });
+  }
+
+  const extensionId = origin.replace("chrome-extension://", "").split("/")[0];
+  const isAllowed = ALLOWED_EXTENSION_IDS.includes(extensionId);
+
+  res.json({
+    extensionId,
+    isAllowed,
+    message: isAllowed
+      ? "Extension is authorized"
+      : "Extension ID not in whitelist",
+    signatureRequired: false, // Set to true if you want to enforce signatures
+    serverTime: Date.now(),
   });
 });
 
@@ -350,6 +485,17 @@ app.post("/scrape", async (req, res) => {
 // Error handling middleware
 app.use((err, req, res, next) => {
   console.error("Unhandled error:", err);
+
+  // Handle CORS errors specifically
+  if (err.message === "Not allowed by CORS") {
+    return res.status(403).json({
+      error: "CORS Error",
+      message:
+        "This origin is not allowed. Chrome extensions must include X-API-Key header.",
+      origin: req.get("Origin"),
+    });
+  }
+
   res.status(500).json({ error: "Internal server error" });
 });
 
